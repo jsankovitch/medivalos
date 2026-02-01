@@ -15,6 +15,50 @@ String getBasicAuthHeader() {
     return "Basic " + encoded;
 }
 
+bool fetchWellnessJson(const String& oldest, const String& newest, DynamicJsonDocument& doc) {
+    if (!apiConfigured) {
+        DEBUG_PRINTLN("[API] API key not configured");
+        return false;
+    }
+
+    DEBUG_PRINTF("[API] Fetching wellness data from %s to %s\n", oldest.c_str(), newest.c_str());
+
+    secureClient.setInsecure();
+    secureClient.setTimeout(30000);
+
+    HTTPClient http;
+    http.setTimeout(30000);
+    http.setReuse(false);
+
+    String url = "https://" + String(INTERVALS_API_HOST) + "/api/v1/athlete/" + athleteId + "/wellness?oldest=" + oldest + "&newest=" + newest;
+    DEBUG_PRINTF("[API] URL: %s\n", url.c_str());
+
+    http.begin(secureClient, url);
+    http.addHeader("Authorization", getBasicAuthHeader());
+    http.addHeader("Accept", "application/json");
+
+    int httpCode = http.GET();
+    DEBUG_PRINTF("[API] HTTP Response code: %d\n", httpCode);
+
+    if (httpCode != HTTP_CODE_OK) {
+        DEBUG_PRINTF("[API] Error: %s\n", http.errorToString(httpCode).c_str());
+        String response = http.getString();
+        DEBUG_PRINTLN("[API] Response: " + response);
+        http.end();
+        return false;
+    }
+
+    DeserializationError error = deserializeJson(doc, http.getStream());
+    if (error) {
+        DEBUG_PRINTF("[API] JSON parse error: %s\n", error.c_str());
+        http.end();
+        return false;
+    }
+
+    http.end();
+    return true;
+}
+
 // ==================== Data Fetching ====================
 bool fetchWellnessData(String oldest, String newest, String& response) {
     if (!apiConfigured) {
@@ -93,123 +137,69 @@ bool fetchWellnessData(String oldest, String newest, String& response) {
 
 // ==================== Get Today's Form ====================
 bool getTodayForm() {
-    String today = getTodayDate();
-    DEBUG_PRINTF("[API] Fetching form for today: %s\n", today.c_str());
-    
-    String response;
-    // Fetch only today's data
-    if (!fetchWellnessData(today, today, response)) {
-        return false;
-    }
-    
-    // Parse JSON
-    DynamicJsonDocument doc(2048);  // Small buffer - only one day of data
-    DeserializationError error = deserializeJson(doc, response);
-    
-    if (error) {
-        DEBUG_PRINTF("[API] JSON parse error: %s\n", error.c_str());
-        return false;
-    }
-    
-    // The API returns an array of wellness records
-    JsonArray arr = doc.as<JsonArray>();
-    
-    if (arr.size() == 0) {
-        DEBUG_PRINTLN("[API] No wellness data for today");
-        return false;
-    }
-    
-    // Get today's entry (should be the only one)
-    JsonObject latest = arr[arr.size() - 1];
-    
-    if (latest.containsKey("ctl") && latest.containsKey("atl")) {
-        float rawCTL = latest["ctl"].as<float>();
-        float rawATL = latest["atl"].as<float>();
-        
-        // Round to whole numbers before calculating Form (matches Python logic)
-        currentCTL = round(rawCTL);
-        currentATL = round(rawATL);
-        currentForm = currentCTL - currentATL;  // Form = Fitness - Fatigue
-        
-        String date = latest["id"].as<String>();
-        lastUpdateTime = date;
-        
-        DEBUG_PRINTF("[API] Date: %s, Raw CTL: %.1f, Raw ATL: %.1f\n", 
-                     date.c_str(), rawCTL, rawATL);
-        DEBUG_PRINTF("[API] Rounded CTL: %.0f, Rounded ATL: %.0f, Form: %.0f\n", 
-                     currentCTL, currentATL, currentForm);
-        return true;
-    }
-    
-    DEBUG_PRINTLN("[API] No CTL/ATL data in response");
-    return false;
+    return refreshFormHistory();
 }
 
 // ==================== Get 30-Day History ====================
-String getLast30DaysForm() {
+bool refreshFormHistory() {
     String today = getTodayDate();
     String oldest = getDateDaysAgo(29);  // 29 days ago + today = 30 days
     
     DEBUG_PRINTF("[API] Fetching 30 days of form: %s to %s\n", oldest.c_str(), today.c_str());
     
-    String response;
-    if (!fetchWellnessData(oldest, today, response)) {
-        return "{\"error\": \"Failed to fetch data\"}";
+    DynamicJsonDocument doc(16384);
+    if (!fetchWellnessJson(oldest, today, doc)) {
+        return false;
     }
-    
-    DEBUG_PRINTF("[API] Response preview: %.100s...\n", response.c_str());
-    
-    // Check if response looks complete (should end with ])
-    if (response.length() < 2 || response[response.length()-1] != ']') {
-        DEBUG_PRINTLN("[API] Response appears truncated!");
-        DEBUG_PRINTF("[API] Last chars: %s\n", response.substring(response.length() - 20).c_str());
-        return "{\"error\": \"Truncated response\"}";
-    }
-    
-    // Parse and extract form data
-    // Buffer needs to be larger than response - ArduinoJson needs ~2x for overhead
-    DynamicJsonDocument doc(12288);  // Increased buffer size
-    DeserializationError error = deserializeJson(doc, response);
-    
-    if (error) {
-        DEBUG_PRINTF("[API] JSON parse error: %s\n", error.c_str());
-        DEBUG_PRINTF("[API] Response length was: %d\n", response.length());
-        return "{\"error\": \"JSON parse error\"}";
-    }
-    
-    // Free up the response string memory now that we've parsed it
-    response = "";
-    
+
     JsonArray arr = doc.as<JsonArray>();
     DEBUG_PRINTF("[API] Parsed %d wellness entries\n", arr.size());
-    
-    // Build a simple output string directly instead of using another JSON document
-    String result = "[";
-    bool first = true;
-    
-    for (size_t i = 0; i < arr.size(); i++) {
+
+    formHistoryCount = 0;
+    for (size_t i = 0; i < arr.size() && formHistoryCount < FORM_HISTORY_DAYS; i++) {
         JsonObject entry = arr[i];
-        
         const char* date = entry["id"] | "unknown";
         float rawCtl = entry["ctl"] | 0.0;
         float rawAtl = entry["atl"] | 0.0;
-        
-        // Round to whole numbers before calculating Form (matches Python logic)
+
         int ctl = (int)round(rawCtl);
         int atl = (int)round(rawAtl);
         int form = ctl - atl;
-        
-        if (!first) result += ",";
-        first = false;
-        
-        result += "{\"date\":\"" + String(date) + "\",\"ctl\":" + String(ctl) + 
-                  ",\"atl\":" + String(atl) + ",\"form\":" + String(form) + "}";
-        
-        yield();  // Let ESP8266 breathe during string building
+
+        formHistory[formHistoryCount].date = String(date);
+        formHistory[formHistoryCount].ctl = ctl;
+        formHistory[formHistoryCount].atl = atl;
+        formHistory[formHistoryCount].form = form;
+        formHistoryCount++;
+        yield();
     }
-    
-    result += "]";
-    
-    DEBUG_PRINTF("[API] Returning %d days of form data (%d bytes)\n", arr.size(), result.length());
-    return result;
+
+    if (formHistoryCount == 0) {
+        DEBUG_PRINTLN("[API] No wellness data returned");
+        return false;
+    }
+
+    FormEntry latest = formHistory[formHistoryCount - 1];
+    currentCTL = latest.ctl;
+    currentATL = latest.atl;
+    currentForm = latest.form;
+    lastUpdateTime = latest.date;
+
+    DEBUG_PRINTF("[API] Latest date: %s, CTL: %d, ATL: %d, Form: %d\n",
+                 latest.date.c_str(), latest.ctl, latest.atl, latest.form);
+    DEBUG_PRINTF("[API] Stored %d days of form data\n", formHistoryCount);
+    return true;
+}
+
+void printCurrentFormToSerial() {
+    DEBUG_PRINTLN("[Serial] Today's Form");
+    DEBUG_PRINTF("%s - Form: %d\n", lastUpdateTime.c_str(), (int)currentForm);
+}
+
+void printFormHistoryToSerial() {
+    DEBUG_PRINTLN("[Serial] 30-Day Form History (Oldest -> Newest)");
+    for (int i = 0; i < formHistoryCount; i++) {
+        DEBUG_PRINTF("%s - Form: %d\n", formHistory[i].date.c_str(), formHistory[i].form);
+        yield();
+    }
 }

@@ -35,7 +35,6 @@
 
 // NTP Configuration
 #define NTP_SERVER "pool.ntp.org"
-#define GMT_OFFSET_SEC (-6 * 3600)  // CST (UTC-6) - adjust for your timezone
 #define DAYLIGHT_OFFSET_SEC 0        // Set to 3600 if DST is active
 
 // EEPROM Memory Layout
@@ -48,6 +47,10 @@
 #define EEPROM_ATHLETE_ID_ADDR 160
 #define EEPROM_ATHLETE_ID_LEN 32
 #define EEPROM_CONFIGURED_FLAG_ADDR 192
+#define EEPROM_SCHEDULE_TIME_ADDR 193
+#define EEPROM_SCHEDULE_TIME_LEN 8
+#define EEPROM_TZ_OFFSET_ADDR 201
+#define EEPROM_TZ_OFFSET_LEN 8
 
 // Intervals.icu API
 #define INTERVALS_API_HOST "intervals.icu"
@@ -77,6 +80,23 @@ float currentForm = 0.0;
 float currentCTL = 0.0;  // Fitness
 float currentATL = 0.0;  // Fatigue
 String lastUpdateTime = "Never";
+
+// Daily refresh schedule
+int scheduleHour = 6;
+int scheduleMinute = 0;
+int gmtOffsetHours = -6;
+String lastDailyFetchDate = "";
+
+struct FormEntry {
+    String date;
+    int ctl;
+    int atl;
+    int form;
+};
+
+const int FORM_HISTORY_DAYS = 30;
+FormEntry formHistory[FORM_HISTORY_DAYS];
+int formHistoryCount = 0;
 
 // ==================== Debug Macros ====================
 #define DEBUG_PRINT(x) Serial.print(x)
@@ -125,6 +145,15 @@ void saveAPIKey(String key, String athId) {
     DEBUG_PRINTLN("[EEPROM] API key saved");
 }
 
+void saveScheduleConfig(int hour, int minute, int tzOffsetHours) {
+    char scheduleBuffer[6];
+    snprintf(scheduleBuffer, sizeof(scheduleBuffer), "%02d:%02d", hour, minute);
+    writeStringToEEPROM(EEPROM_SCHEDULE_TIME_ADDR, String(scheduleBuffer), EEPROM_SCHEDULE_TIME_LEN);
+    writeStringToEEPROM(EEPROM_TZ_OFFSET_ADDR, String(tzOffsetHours), EEPROM_TZ_OFFSET_LEN);
+    EEPROM.commit();
+    DEBUG_PRINTLN("[EEPROM] Schedule configuration saved");
+}
+
 void loadCredentials() {
     if (EEPROM.read(EEPROM_CONFIGURED_FLAG_ADDR) == 1) {
         wifiSSID = readStringFromEEPROM(EEPROM_WIFI_SSID_ADDR, EEPROM_WIFI_SSID_LEN);
@@ -138,6 +167,19 @@ void loadCredentials() {
     if (athleteId.length() == 0) athleteId = "0";
     apiConfigured = (apiKey.length() > 0);
     DEBUG_PRINTF("[EEPROM] API configured: %s\n", apiConfigured ? "yes" : "no");
+
+    String scheduleValue = readStringFromEEPROM(EEPROM_SCHEDULE_TIME_ADDR, EEPROM_SCHEDULE_TIME_LEN);
+    String tzOffsetValue = readStringFromEEPROM(EEPROM_TZ_OFFSET_ADDR, EEPROM_TZ_OFFSET_LEN);
+
+    if (scheduleValue.length() == 5 && scheduleValue[2] == ':') {
+        scheduleHour = scheduleValue.substring(0, 2).toInt();
+        scheduleMinute = scheduleValue.substring(3, 5).toInt();
+    }
+
+    if (tzOffsetValue.length() > 0) {
+        gmtOffsetHours = tzOffsetValue.toInt();
+    }
+    DEBUG_PRINTF("[EEPROM] Schedule: %02d:%02d, GMT offset: %d\n", scheduleHour, scheduleMinute, gmtOffsetHours);
 }
 
 void clearAllCredentials() {
@@ -151,6 +193,9 @@ void clearAllCredentials() {
     athleteId = "0";
     wifiConfigured = false;
     apiConfigured = false;
+    scheduleHour = 6;
+    scheduleMinute = 0;
+    gmtOffsetHours = -6;
     DEBUG_PRINTLN("[EEPROM] All credentials cleared");
 }
 
@@ -178,6 +223,7 @@ void setup() {
         // Setup web server routes for station mode
         server.on("/", HTTP_GET, handleRoot);
         server.on("/saveapi", HTTP_POST, handleSaveAPI);
+        server.on("/saveschedule", HTTP_POST, handleSaveSchedule);
         server.on("/reset", HTTP_POST, handleReset);
         server.on("/api/form", HTTP_GET, handleAPIForm);
         server.on("/api/history", HTTP_GET, handleAPIHistory);
@@ -224,6 +270,19 @@ void setup() {
         DEBUG_PRINTF("  Access: http://%s.local\n", MDNS_NAME);
         DEBUG_PRINTF("  Or: http://%s\n", WiFi.localIP().toString().c_str());
         DEBUG_PRINTLN("========================================");
+
+        if (apiConfigured && timeSync) {
+            DEBUG_PRINTLN("[Startup] Fetching initial 30-day form history...");
+            if (refreshFormHistory()) {
+                lastDailyFetchDate = getTodayDate();
+                printCurrentFormToSerial();
+                printFormHistoryToSerial();
+            } else {
+                DEBUG_PRINTLN("[Startup] Initial fetch failed");
+            }
+        } else {
+            DEBUG_PRINTLN("[Startup] Skipping initial fetch (API key or time missing)");
+        }
     }
 }
 
@@ -239,7 +298,46 @@ void loop() {
     if (!isAPMode) {
         MDNS.update();
     }
+
+    if (!isAPMode && apiConfigured && timeSync) {
+        static unsigned long lastScheduleCheck = 0;
+        unsigned long now = millis();
+        if (now - lastScheduleCheck > 30000) {
+            lastScheduleCheck = now;
+            maybeRunScheduledRefresh();
+        }
+    }
     
     // Add a small delay to prevent watchdog issues
     delay(1);
+}
+
+void maybeRunScheduledRefresh() {
+    time_t now = time(nullptr);
+    struct tm* timeinfo = localtime(&now);
+    if (!timeinfo) {
+        DEBUG_PRINTLN("[Schedule] Failed to read local time");
+        return;
+    }
+
+    char dateBuffer[11];
+    snprintf(dateBuffer, sizeof(dateBuffer), "%04d-%02d-%02d",
+             timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday);
+    String today = String(dateBuffer);
+
+    if (lastDailyFetchDate == today) {
+        return;
+    }
+
+    if (timeinfo->tm_hour > scheduleHour ||
+        (timeinfo->tm_hour == scheduleHour && timeinfo->tm_min >= scheduleMinute)) {
+        DEBUG_PRINTF("[Schedule] Running daily refresh at %02d:%02d\n", scheduleHour, scheduleMinute);
+        if (refreshFormHistory()) {
+            lastDailyFetchDate = today;
+            printCurrentFormToSerial();
+            printFormHistoryToSerial();
+        } else {
+            DEBUG_PRINTLN("[Schedule] Daily refresh failed");
+        }
+    }
 }

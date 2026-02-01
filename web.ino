@@ -134,23 +134,12 @@ void handleRoot() {
         html += "<div class='status error'>Time not synced</div>";
     }
     
-    // Form Display Card
-    html += "<div class='form-card'>";
-    html += "<div class='form-label'>Current Form</div>";
-    String formClass = currentForm >= 0 ? "positive" : "negative";
-    html += "<div class='form-value " + formClass + "'>" + String((int)currentForm) + "</div>";
-    html += "<div class='stats'>";
-    html += "<div class='stat'><div class='stat-value'>" + String((int)currentCTL) + "</div><div class='stat-label'>Fitness (CTL)</div></div>";
-    html += "<div class='stat'><div class='stat-value'>" + String((int)currentATL) + "</div><div class='stat-label'>Fatigue (ATL)</div></div>";
-    html += "</div>";
-    html += "<p style='color:#666;font-size:12px;margin-top:15px;'>Last updated: " + lastUpdateTime + "</p>";
-    html += "</div>";
-    
-    yield();  // Let ESP8266 handle background tasks
+    // Action Status
+    html += "<div id='requestStatus' class='status info'>Ready to fetch data</div>";
     
     // Action Buttons
-    html += "<button onclick='getForm()'>Get Today's Form</button>";
-    html += "<button onclick='getHistory()'>View Last 30 Days</button>";
+    html += "<button onclick='getForm()'>Fetch Current Form</button>";
+    html += "<button onclick='getHistory()'>Fetch Last 30 Days</button>";
     
     // API Configuration
     html += "<h2>API Settings</h2>";
@@ -172,22 +161,53 @@ void handleRoot() {
     
     yield();  // Let ESP8266 handle background tasks
     
+    // Schedule Configuration
+    html += "<h2>Daily Refresh Schedule</h2>";
+    html += "<form method='POST' action='/saveschedule'>";
+    html += "<label for='hour'>Refresh Time</label>";
+    html += "<div style='display:flex;gap:10px;align-items:center;'>";
+    html += "<select name='hour' id='hour'>";
+    for (int h = 1; h <= 12; h++) {
+        String selected = (scheduleHour % 12 == h % 12) ? " selected" : "";
+        html += "<option value='" + String(h) + "'" + selected + ">" + String(h) + "</option>";
+    }
+    html += "</select>";
+    html += "<select name='minute' id='minute'>";
+    for (int m = 0; m < 60; m += 5) {
+        char minuteBuf[3];
+        snprintf(minuteBuf, sizeof(minuteBuf), "%02d", m);
+        String selected = (scheduleMinute == m) ? " selected" : "";
+        html += "<option value='" + String(minuteBuf) + "'" + selected + ">" + String(minuteBuf) + "</option>";
+    }
+    html += "</select>";
+    String period = (scheduleHour >= 12) ? "PM" : "AM";
+    html += "<select name='period' id='period'>";
+    html += "<option value='AM'" + String(period == "AM" ? " selected" : "") + ">AM</option>";
+    html += "<option value='PM'" + String(period == "PM" ? " selected" : "") + ">PM</option>";
+    html += "</select>";
+    html += "</div>";
+    html += "<label for='tzoffset'>Timezone Offset (UTC)</label>";
+    html += "<select name='tzoffset' id='tzoffset'>";
+    for (int tz = -12; tz <= 14; tz++) {
+        String selected = (gmtOffsetHours == tz) ? " selected" : "";
+        html += "<option value='" + String(tz) + "'" + selected + ">UTC" + (tz >= 0 ? "+" : "") + String(tz) + "</option>";
+    }
+    html += "</select>";
+    html += "<button type='submit'>Save Schedule</button>";
+    html += "</form>";
+    
     // Reset Button
     html += "<h2>Device Settings</h2>";
     html += "<form method='POST' action='/reset' onsubmit='return confirm(\"Reset all settings?\")'>";
     html += "<button type='submit' class='btn btn-danger'>Reset All Settings</button>";
     html += "</form>";
     
-    // History Display Area (hidden by default)
-    html += "<div id='historyArea' style='display:none;'>";
-    html += "<h2>Form History (Last 30 Days)</h2>";
-    html += "<div id='historyContent'></div>";
-    html += "</div>";
-    
     // JavaScript (minified)
     html += "<script>";
-    html += "function getForm(){fetch('/api/form').then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert('Error: '+d.error);}).catch(e=>alert('Error fetching form'));}";
-    html += "function getHistory(){document.getElementById('historyArea').style.display='block';document.getElementById('historyContent').innerHTML='<div class=loading>Loading...</div>';fetch('/api/history').then(r=>r.json()).then(d=>{if(d.error){document.getElementById('historyContent').innerHTML='<div class=status>'+d.error+'</div>';return;}let h='<table><tr><th>Date</th><th>Form</th><th>CTL</th><th>ATL</th></tr>';d.reverse().forEach(r=>{let c=r.form>=0?'#00ff88':'#ff4444';h+='<tr><td>'+r.date+'</td><td style=color:'+c+'>'+r.form+'</td><td>'+r.ctl+'</td><td>'+r.atl+'</td></tr>';});h+='</table>';document.getElementById('historyContent').innerHTML=h;}).catch(e=>document.getElementById('historyContent').innerHTML='<div class=status>Error</div>');}";
+    html += "const statusEl=document.getElementById('requestStatus');";
+    html += "function setStatus(text,type){statusEl.textContent=text;statusEl.className='status '+type;}";
+    html += "function getForm(){setStatus('Fetching current form...','info');fetch('/api/form').then(r=>r.json()).then(d=>{if(d.success){setStatus(d.message,'success');}else{setStatus(d.error,'error');}}).catch(e=>setStatus('Error fetching current form','error'));}";
+    html += "function getHistory(){setStatus('Fetching 30-day history...','info');fetch('/api/history').then(r=>r.json()).then(d=>{if(d.success){setStatus(d.message,'success');}else{setStatus(d.error,'error');}}).catch(e=>setStatus('Error fetching 30-day history','error'));}";
     html += "</script>";
     
     html += "</div></body></html>";
@@ -214,6 +234,40 @@ void handleSaveAPI() {
     
     DEBUG_PRINTLN("[Web] API key saved");
     
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+}
+
+// Save Schedule Configuration
+void handleSaveSchedule() {
+    int hourInput = server.arg("hour").toInt();
+    int minuteInput = server.arg("minute").toInt();
+    String period = server.arg("period");
+    int tzOffset = server.arg("tzoffset").toInt();
+
+    if (hourInput < 1) hourInput = 1;
+    if (hourInput > 12) hourInput = 12;
+    if (minuteInput < 0) minuteInput = 0;
+    if (minuteInput > 59) minuteInput = 59;
+    if (tzOffset < -12) tzOffset = -12;
+    if (tzOffset > 14) tzOffset = 14;
+
+    int hour24 = hourInput % 12;
+    if (period == "PM") {
+        hour24 += 12;
+    }
+
+    scheduleHour = hour24;
+    scheduleMinute = minuteInput;
+    gmtOffsetHours = tzOffset;
+    timeSync = false;
+    setupNTP();
+
+    saveScheduleConfig(scheduleHour, scheduleMinute, gmtOffsetHours);
+
+    DEBUG_PRINTF("[Web] Schedule saved: %02d:%02d, UTC offset: %d\n",
+                 scheduleHour, scheduleMinute, gmtOffsetHours);
+
     server.sendHeader("Location", "/");
     server.send(302, "text/plain", "");
 }
@@ -250,11 +304,9 @@ void handleAPIForm() {
         return;
     }
     
-    if (getTodayForm()) {
-        String json = "{\"success\":true,\"form\":" + String((int)currentForm) + 
-                     ",\"ctl\":" + String((int)currentCTL) + 
-                     ",\"atl\":" + String((int)currentATL) + 
-                     ",\"date\":\"" + lastUpdateTime + "\"}";
+    if (refreshFormHistory()) {
+        printCurrentFormToSerial();
+        String json = "{\"success\":true,\"message\":\"Current form fetched. See Serial output.\"}";
         server.send(200, "application/json", json);
     } else {
         server.send(500, "application/json", "{\"success\":false,\"error\":\"Failed to fetch data\"}");
@@ -266,12 +318,17 @@ void handleAPIHistory() {
     DEBUG_PRINTLN("[API] History request received");
     
     if (!apiConfigured) {
-        server.send(400, "application/json", "{\"error\":\"API key not configured\"}");
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"API key not configured\"}");
         return;
     }
     
-    String history = getLast30DaysForm();
-    server.send(200, "application/json", history);
+    if (refreshFormHistory()) {
+        printCurrentFormToSerial();
+        printFormHistoryToSerial();
+        server.send(200, "application/json", "{\"success\":true,\"message\":\"30-day history fetched. See Serial output.\"}");
+    } else {
+        server.send(500, "application/json", "{\"success\":false,\"error\":\"Failed to fetch data\"}");
+    }
 }
 
 // Handle 404 / Captive Portal Redirect
