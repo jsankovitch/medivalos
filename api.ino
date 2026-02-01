@@ -53,8 +53,19 @@ bool fetchWellnessJson(const String& oldest, const String& newest, DynamicJsonDo
     filter[0]["ctl"] = true;
     filter[0]["atl"] = true;
 
-    WiFiClient& stream = http.getStream();
-    DeserializationError error = deserializeJson(doc, stream, DeserializationOption::Filter(filter));
+    String response = http.getString();
+    if (response.length() > 0) {
+        int jsonStart = response.indexOf('[');
+        int jsonEnd = response.lastIndexOf(']');
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            if (jsonStart > 0 || jsonEnd < (int)response.length() - 1) {
+                DEBUG_PRINTF("[API] Trimming response: jsonStart=%d, jsonEnd=%d\n", jsonStart, jsonEnd);
+                response = response.substring(jsonStart, jsonEnd + 1);
+            }
+        }
+    }
+
+    DeserializationError error = deserializeJson(doc, response, DeserializationOption::Filter(filter));
     if (error) {
         DEBUG_PRINTF("[API] JSON parse error: %s\n", error.c_str());
         http.end();
