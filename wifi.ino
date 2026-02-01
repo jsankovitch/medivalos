@@ -25,7 +25,11 @@ String scanNetworks() {
     for (int i = 0; i < n && uniqueCount < MAX_NETWORKS; i++) {
         String ssid = WiFi.SSID(i);
         int rssi = WiFi.RSSI(i);
+#if defined(ESP8266)
+        bool open = (WiFi.encryptionType(i) == ENC_TYPE_NONE);
+#else
         bool open = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+#endif
         
         if (ssid.length() == 0) continue;  // Skip hidden networks
         
@@ -112,7 +116,11 @@ bool connectToWiFi() {
     delay(100);
     
     // Disable WiFi sleep for more reliable connection
+#if defined(ESP8266)
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+#else
     WiFi.setSleep(WIFI_PS_NONE);
+#endif
     
     // Set auto-reconnect
     WiFi.setAutoReconnect(true);
