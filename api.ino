@@ -48,9 +48,26 @@ bool fetchWellnessJson(const String& oldest, const String& newest, DynamicJsonDo
         return false;
     }
 
-    DeserializationError error = deserializeJson(doc, http.getStream());
+    String response = http.getString();
+    DEBUG_PRINTF("[API] Response length: %d bytes\n", response.length());
+
+    if (response.length() > 0) {
+        int jsonStart = response.indexOf('[');
+        int jsonEnd = response.lastIndexOf(']');
+
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            if (jsonStart > 0 || jsonEnd < (int)response.length() - 1) {
+                DEBUG_PRINTF("[API] Trimming response: jsonStart=%d, jsonEnd=%d\n", jsonStart, jsonEnd);
+                response = response.substring(jsonStart, jsonEnd + 1);
+                DEBUG_PRINTF("[API] Trimmed length: %d bytes\n", response.length());
+            }
+        }
+    }
+
+    DeserializationError error = deserializeJson(doc, response);
     if (error) {
         DEBUG_PRINTF("[API] JSON parse error: %s\n", error.c_str());
+        DEBUG_PRINTF("[API] Preview: %.200s\n", response.c_str());
         http.end();
         return false;
     }
