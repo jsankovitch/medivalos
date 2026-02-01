@@ -8,7 +8,7 @@
  * - Form calculation and display
  * - Serial debugging
  * 
- * Hardware: ESP8266 (NodeMCU, Wemos D1, etc.)
+ * Hardware: ESP32 (SparkFun ESP32 Thing, etc.)
  * 
  * File Structure:
  * - medivalos.ino  : Main file (config, globals, setup, loop)
@@ -17,10 +17,10 @@
  * - web.ino        : Web server handlers, HTML pages
  */
 
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
-#include <ESP8266HTTPClient.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <DNSServer.h>
 #include <EEPROM.h>
@@ -57,7 +57,7 @@
 #define INTERVALS_API_PORT 443
 
 // ==================== Global Variables ====================
-ESP8266WebServer server(80);
+WebServer server(80);
 DNSServer dnsServer;
 WiFiClientSecure secureClient;
 
@@ -295,10 +295,6 @@ void loop() {
     
     server.handleClient();
     
-    if (!isAPMode) {
-        MDNS.update();
-    }
-
     if (!isAPMode && apiConfigured && timeSync) {
         static unsigned long lastScheduleCheck = 0;
         unsigned long now = millis();
