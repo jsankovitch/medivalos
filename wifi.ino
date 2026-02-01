@@ -191,7 +191,7 @@ void setupMDNS() {
 // ==================== NTP Time Sync ====================
 void setupNTP() {
     DEBUG_PRINTLN("[NTP] Configuring time...");
-    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+    configTime(gmtOffsetHours * 3600, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
     
     // Wait for time to sync (max 10 seconds)
     int attempts = 0;
