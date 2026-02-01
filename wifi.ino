@@ -25,7 +25,7 @@ String scanNetworks() {
     for (int i = 0; i < n && uniqueCount < MAX_NETWORKS; i++) {
         String ssid = WiFi.SSID(i);
         int rssi = WiFi.RSSI(i);
-        bool open = (WiFi.encryptionType(i) == ENC_TYPE_NONE);
+        bool open = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
         
         if (ssid.length() == 0) continue;  // Skip hidden networks
         
@@ -112,7 +112,7 @@ bool connectToWiFi() {
     delay(100);
     
     // Disable WiFi sleep for more reliable connection
-    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+    WiFi.setSleep(WIFI_PS_NONE);
     
     // Set auto-reconnect
     WiFi.setAutoReconnect(true);
